@@ -58,6 +58,13 @@ func (h *HTTPHandler) ProductHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(product)
 }
 
+// HealthHandler handles GET /health checks, reporting service status.
+func (h *HTTPHandler) HealthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"UP"}`))
+}
+
 // CreateOrderRequest defines the schema for the POST /order endpoint.
 type CreateOrderRequest struct {
 	OrderID string `json:"order_id"`

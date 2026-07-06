@@ -19,6 +19,8 @@ type Config struct {
 	CacheTTL           time.Duration
 	OutboxPollInterval time.Duration
 	DLQTopic           string
+	ConsulAddress      string
+	ConsulEnabled      bool
 }
 
 // LoadConfig fetches configuration from environment variables with sensible defaults.
@@ -35,6 +37,8 @@ func LoadConfig() *Config {
 		CacheTTL:           getEnvAsDuration("CACHE_TTL", 5*time.Minute),
 		OutboxPollInterval: getEnvAsDuration("OUTBOX_POLL_INTERVAL", 100*time.Millisecond),
 		DLQTopic:           getEnv("DLQ_TOPIC", "orders-dlq"),
+		ConsulAddress:      getEnv("CONSUL_ADDRESS", "localhost:8500"),
+		ConsulEnabled:      getEnvAsBool("CONSUL_ENABLED", false),
 	}
 }
 
@@ -55,6 +59,14 @@ func getEnvAsSlice(key string, defaultVal []string) []string {
 func getEnvAsInt(key string, defaultVal int) int {
 	valueStr := getEnv(key, "")
 	if value, err := strconv.Atoi(valueStr); err == nil {
+		return value
+	}
+	return defaultVal
+}
+
+func getEnvAsBool(key string, defaultVal bool) bool {
+	valueStr := getEnv(key, "")
+	if value, err := strconv.ParseBool(valueStr); err == nil {
 		return value
 	}
 	return defaultVal

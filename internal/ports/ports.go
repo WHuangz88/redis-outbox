@@ -64,3 +64,9 @@ type Metrics interface {
 type DLQPublisher interface {
 	PublishDLQ(ctx context.Context, topic string, key string, value []byte, err error, headers map[string]string) error
 }
+
+// ServiceRegistry defines the dynamic registration interface for service discovery.
+type ServiceRegistry interface {
+	Register(ctx context.Context, id, name, host string, port int) error
+	Deregister(ctx context.Context, id string) error
+}

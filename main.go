@@ -8,10 +8,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	cacheAdapter "kafka-demo/internal/adapters/cache"
+	consulAdapter "kafka-demo/internal/adapters/consul"
 	httpAdapter "kafka-demo/internal/adapters/http"
 	kafkaAdapter "kafka-demo/internal/adapters/kafka"
 	repoAdapter "kafka-demo/internal/adapters/repository"
@@ -19,8 +22,11 @@ import (
 	"kafka-demo/internal/domain"
 	"kafka-demo/internal/logger"
 	"kafka-demo/internal/metrics"
+	"kafka-demo/internal/ports"
 	"kafka-demo/internal/service"
 	"kafka-demo/internal/worker"
+
+	"github.com/google/uuid"
 )
 
 func main() {
@@ -37,6 +43,19 @@ func main() {
 	repo := repoAdapter.NewInMemoryRepository()
 	cache := cacheAdapter.NewRedisCache(cfg.RedisAddress)
 	publisher := kafkaAdapter.NewKafkaPublisher(cfg.KafkaBrokers)
+
+	// 2.5 Initialize Service Discovery Registry (Consul or NoOp)
+	var registry ports.ServiceRegistry
+	if cfg.ConsulEnabled {
+		var err error
+		registry, err = consulAdapter.NewConsulRegistry(cfg.ConsulAddress)
+		if err != nil {
+			logAdapter.Error(ctx, "Failed to initialize Consul registry. Falling back to NoOp.", err)
+			registry = consulAdapter.NewNoOpRegistry()
+		}
+	} else {
+		registry = consulAdapter.NewNoOpRegistry()
+	}
 
 	// 3. Initialize business logic service
 	orderService := service.NewOrderService(repo, cache, logAdapter, metricAdapter, cfg.CacheTTL)
@@ -71,6 +90,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/product", httpHandler.ProductHandler)
 	mux.HandleFunc("/order", httpHandler.OrderHandler)
+	mux.HandleFunc("/health", httpHandler.HealthHandler)
 
 	server := &http.Server{
 		Addr:    cfg.HTTPPort,
@@ -95,6 +115,21 @@ func main() {
 		}
 	}()
 
+	// 7.5 Register with Service Discovery (Consul)
+	serviceID := "order-service-" + uuid.NewString()
+	port := 8080
+	if hostPortParts := strings.Split(cfg.HTTPPort, ":"); len(hostPortParts) == 2 {
+		if p, err := strconv.Atoi(hostPortParts[1]); err == nil {
+			port = p
+		}
+	}
+
+	if err := registry.Register(ctx, serviceID, "order-service", "127.0.0.1", port); err != nil {
+		logAdapter.Error(ctx, "Failed to register service with Consul. Continuing in fail-open mode.", err)
+	} else {
+		logAdapter.Info(ctx, "Service successfully registered with Consul", "service_id", serviceID)
+	}
+
 	// 8. Start HTTP Server
 	go func() {
 		fmt.Printf("HTTP Server listening on port %s\n", cfg.HTTPPort)
@@ -111,10 +146,19 @@ func main() {
 	sig := <-sigChan
 	fmt.Printf("Interception of signal %v. Initializing graceful shutdown...\n", sig)
 
-	// A. Trigger context cancellation for all background processes (Workers/Consumer)
+	// A. Deregister from Consul first to stop incoming traffic routing
+	deregCtx, deregCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if err := registry.Deregister(deregCtx, serviceID); err != nil {
+		fmt.Printf("Consul deregistration failed: %v\n", err)
+	} else {
+		fmt.Println("Consul deregistration complete.")
+	}
+	deregCancel()
+
+	// B. Trigger context cancellation for all background processes (Workers/Consumer)
 	cancel()
 
-	// B. Shutdown HTTP Server with a tight timeout bounds
+	// C. Shutdown HTTP Server with a tight timeout bounds
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 
@@ -124,11 +168,11 @@ func main() {
 		fmt.Println("HTTP Server stopped gracefully.")
 	}
 
-	// C. Wait for Outbox worker loop to completely drain and exit
+	// D. Wait for Outbox worker loop to completely drain and exit
 	outboxWorker.Wait()
 	fmt.Println("Outbox worker stopped gracefully.")
 
-	// D. Safely close physical broker and caching connections
+	// E. Safely close physical broker and caching connections
 	_ = consumer.Close()
 	fmt.Println("Kafka Reader connection closed.")
 	
